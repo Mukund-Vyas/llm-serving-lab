@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-qwen
+  labels: {app: vllm-qwen}
+spec:
+  replicas: 1                      # scale out = data parallelism (one full model copy per pod)
+  selector:
+    matchLabels: {app: vllm-qwen}
+  template:
+    metadata:
+      labels: {app: vllm-qwen}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: "8000"
+    spec:
+      # nodeSelector / tolerations: pin to your GPU node pool, e.g.
+      # nodeSelector: {nvidia.com/gpu.present: "true"}
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:REPLACE_WITH_TESTED_TAG
+          command: ["vllm", "serve"]
+          args:
+            - Qwen/Qwen2.5-1.5B-Instruct
+            - --dtype=half
+            - --max-model-len=4096
+            - --gpu-memory-utilization=0.85
+            - --max-num-seqs=64
+            - --port=8000
+            # for a bigger model on 2 GPUs: --tensor-parallel-size=2 and nvidia.com/gpu: 2
+          ports:
+            - containerPort: 8000
+          resources:
+            limits:
+              nvidia.com/gpu: 1    # GPUs are requested via limits
+              memory: 16Gi
+            requests:
+              cpu: "4"
+              memory: 12Gi
+          env:
+            - name: HF_HOME
+              value: /models/hf
+          volumeMounts:
+            - {name: hf-cache, mountPath: /models/hf}
+            - {name: shm, mountPath: /dev/shm}   # shared memory needed by PyTorch workers
+          readinessProbe:           # don't send traffic until the model is loaded
+            httpGet: {path: /health, port: 8000}
+            initialDelaySeconds: 60
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /health, port: 8000}
+            initialDelaySeconds: 180
+            periodSeconds: 20
+            failureThreshold: 5
+      volumes:
+        - name: hf-cache
+          persistentVolumeClaim: {claimName: hf-cache}
+        - name: shm
+          emptyDir: {medium: Memory, sizeLimit: 2Gi}
